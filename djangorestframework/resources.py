@@ -78,6 +78,8 @@ class FormResource(Resource):
     This can be overridden by a :attr:`form` attribute on the :class:`views.View`.
     """
 
+    allow_unknown_fields = False
+
 
     def validate_request(self, data, files=None):
         """
@@ -127,9 +129,12 @@ class FormResource(Resource):
         form_fields_set = set(bound_form.fields.keys())
         allowed_extra_fields_set = set(allowed_extra_fields)
 
-        # In addition to regular validation we also ensure no additional fields are being passed in...
-        unknown_fields = seen_fields_set - (form_fields_set | allowed_extra_fields_set)
-        unknown_fields = unknown_fields - set(('csrfmiddlewaretoken', '_accept', '_method'))  # TODO: Ugh.
+        if self.allow_unknown_fields:
+            unknown_fields = set()
+        else:
+            # In addition to regular validation we also ensure no additional fields are being passed in...
+            unknown_fields = seen_fields_set - (form_fields_set | allowed_extra_fields_set)
+            unknown_fields = unknown_fields - set(('csrfmiddlewaretoken', '_accept', '_method'))  # TODO: Ugh.
         
         # Check using both regular validation, and our stricter no additional fields rule
         if bound_form.is_valid() and not unknown_fields:
@@ -279,6 +284,8 @@ class ModelResource(FormResource):
     The list of extra fields to include.  This is only used if :attr:`fields` is not set.
     """
 
+    queryset = None
+
     def __init__(self, view=None, depth=None, stack=[], **kwargs):
         """
         Allow :attr:`form` and :attr:`model` attributes set on the
@@ -289,6 +296,22 @@ class ModelResource(FormResource):
 
         self.model = getattr(view, 'model', None) or self.model
 
+    def get_instance(self):
+        model = self.model
+        view = self.view
+
+        if view.args:
+            # If we have any none kwargs then assume the last represents the primrary key
+            return model.objects.get(pk=view.args[-1], **view.kwargs)
+        else:
+            # Otherwise assume the kwargs uniquely identify the model
+            return model.objects.get(**view.kwargs)
+
+    def save_instance(self, instance):
+        instance.save()
+
+    def delete_instance(self, instance):
+        instance.delete()
 
     def validate_request(self, data, files=None):
         """
@@ -381,6 +404,8 @@ class ModelResource(FormResource):
                     pass
         raise _SkipField
 
+    def get_queryset(self):
+        return self.queryset
 
     @property
     def _model_fields_set(self):

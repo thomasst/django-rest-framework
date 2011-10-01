@@ -385,7 +385,12 @@ class AuthMixin(object):
         Check user permissions and either raise an ``ErrorResponse`` or return.
         """
         user = self.user
-        for permission_cls in self.permissions:
+
+        permissions = getattr(self.resource, 'permissions', None)
+        if permissions is None:
+            permissions = self.permissions
+
+        for permission_cls in permissions:
             permission = permission_cls(self)
             permission.check_permission(user)
 
@@ -426,32 +431,35 @@ class ResourceMixin(object):
         return self.validate_request(self.request.GET)
 
     @property
-    def _resource(self):
-        if self.resource:
-            return self.resource(self)
-        elif getattr(self, 'model', None):
-            return ModelResource(self)
-        elif getattr(self, 'form', None):
-            return FormResource(self)
-        elif getattr(self, '%s_form' % self.method.lower(), None):
-            return FormResource(self)
-        return Resource(self)
+    def RESOURCE(self):
+        if not hasattr(self, '_resource'):
+            if self.resource:
+                self._resource = self.resource(self)
+            elif getattr(self, 'model', None):
+                self._resource = ModelResource(self)
+            elif getattr(self, 'form', None):
+                self._resource = FormResource(self)
+            elif getattr(self, '%s_form' % self.method.lower(), None):
+                self._resource = FormResource(self)
+            else:
+                self._resource = Resource(self)
+        return self._resource
 
     def validate_request(self, data, files=None):
         """
         Given the request *data* and optional *files*, return the cleaned, validated content.
         May raise an :class:`response.ErrorResponse` with status code 400 (Bad Request) on failure.
         """
-        return self._resource.validate_request(data, files)
+        return self.RESOURCE.validate_request(data, files)
 
     def filter_response(self, obj):
         """
         Given the response content, filter it into a serializable object.
         """
-        return self._resource.filter_response(obj)
+        return self.RESOURCE.filter_response(obj)
 
     def get_bound_form(self, content=None, method=None):
-        return self._resource.get_bound_form(content, method=method)
+        return self.RESOURCE.get_bound_form(content, method=method)
 
 
 
@@ -489,15 +497,7 @@ class ReadModelMixin(object):
         model = self.resource.model
 
         try:
-            if args:
-                # If we have any none kwargs then assume the last represents the primrary key
-                self.model_instance = model.objects.get(pk=args[-1], **kwargs)
-            else:
-                # Otherwise assume the kwargs uniquely identify the model
-                filtered_keywords = kwargs.copy()
-                if BaseRenderer._FORMAT_QUERY_PARAM in filtered_keywords:
-                    del filtered_keywords[BaseRenderer._FORMAT_QUERY_PARAM]
-                self.model_instance = model.objects.get(**filtered_keywords)
+            self.model_instance = self.RESOURCE.get_instance()
         except model.DoesNotExist:
             raise ErrorResponse(status.HTTP_404_NOT_FOUND)
 
@@ -534,7 +534,7 @@ class CreateModelMixin(object):
             instance = model(pk=args[-1], **all_kw_args)
         else:
             instance = model(**all_kw_args)
-        instance.save()
+        self.RESOURCE.save_instance(instance)
 
         for fieldname in m2m_data:
             manager = getattr(instance, fieldname)
@@ -564,20 +564,14 @@ class UpdateModelMixin(object):
         
         # TODO: update on the url of a non-existing resource url doesn't work correctly at the moment - will end up with a new url 
         try:
-            if args:
-                # If we have any none kwargs then assume the last represents the primrary key
-                self.model_instance = model.objects.get(pk=args[-1], **kwargs)
-            else:
-                # Otherwise assume the kwargs uniquely identify the model
-                self.model_instance = model.objects.get(**kwargs)
+            self.model_instance = self.RESOURCE.get_instance()
 
             for (key, val) in self.CONTENT.items():
                 setattr(self.model_instance, key, val)
         except model.DoesNotExist:
             self.model_instance = model(**self.CONTENT)
-            self.model_instance.save()
 
-        self.model_instance.save()
+        self.RESOURCE.save_instance(self.model_instance)
         return self.model_instance
 
 
@@ -589,16 +583,11 @@ class DeleteModelMixin(object):
         model = self.resource.model
 
         try:
-            if args:
-                # If we have any none kwargs then assume the last represents the primrary key
-                instance = model.objects.get(pk=args[-1], **kwargs)
-            else:
-                # Otherwise assume the kwargs uniquely identify the model
-                instance = model.objects.get(**kwargs)
+            instance = self.RESOURCE.get_instance()
         except model.DoesNotExist:
             raise ErrorResponse(status.HTTP_404_NOT_FOUND, None, {})
 
-        instance.delete()
+        self.RESOURCE.delete_instance(instance)
         return
 
 
@@ -621,10 +610,17 @@ class ListModelMixin(object):
     # Any feedback welcomed.
     queryset = None
 
+    def get_queryset(self):
+        return self.queryset
+
     def get(self, request, *args, **kwargs):
         model = self.resource.model
 
-        queryset = self.queryset if self.queryset is not None else model.objects.all()
+        queryset = self.get_queryset()
+        if queryset is None:
+            queryset = self.RESOURCE.get_queryset()
+            if queryset is None:
+                queryset = model.objects.all()
 
         if hasattr(self, 'resource'):
             ordering = getattr(self.resource, 'ordering', None)
